@@ -1,0 +1,135 @@
+# llama-server launcher config
+# Lines below are examples — edit to match your setup.
+#
+# Parameter merge order: defaults → models.<name>.params → CLI args
+#
+# Boolean params: set to true/false for toggle flags (e.g., mlock: true → --mlock)
+
+# Environment variables are set up so the iGPU is bypassed
+executables:
+  vulkan:
+    path: /llm/runtimes/native/llama-server
+    env: "GGML_VK_VISIBLE_DEVICES=1,2,3"
+  rocm:
+    path: /llm/runtimes/rocm/llama-server
+    env: "HIP_VISIBLE_DEVICES=0,1,2"
+
+defaults:
+  executable: vulkan
+  mmap: off
+  top-k: 20
+  port: 8033
+  threads: 6
+  parallel: 1
+  top-p: 0.92
+  min-p: 0.02
+  host: 0.0.0.0
+  cache-ram: 12288
+  ctx-size: 65536
+  flash-attn: auto
+  batch-size: 2048
+  ubatch-size: 1024
+  temperature: 0.85
+  n-gpu-layers: all
+  cache-type-k: q8_0
+  cache-type-v: q8_0
+  ctx-checkpoints: 48
+  repeat-penalty: 1.05
+  presence-penalty: 0.0
+
+models:
+  Qwen122B:
+    path: /llm/models/Qwen3.5/122B-A10B/Q5_K_S/Qwen3.5-122B-A10B-UD-Q5_K_S-00001-of-00003.gguf
+    executable: rocm
+    alias: Qwen3.5-122B-Q5
+    params:
+      fit: off
+      top-k: 20
+      temperature: 0.6
+      cache-type-k: q8_0
+      cache-type-v: q8_0
+      split-mode: tensor
+      device: ROCm0,ROCM1,ROCm2
+      spec-draft-n-max: 4
+      spec-type: draft-mtp
+      spec-draft-p-min: 0.02
+  Qwen27B:
+    path: /llm/models/Qwen3.6/27B/Q8_0/Qwen3.6-27B-Q8_0.gguf
+    executable: rocm
+    alias: Qwen3.6-27B-Q8_0
+    params:
+      fit: off
+      top-k: 20
+      temperature: 0.6
+      cache-type-k: bf16
+      cache-type-v: bf16
+      split-mode: tensor
+      device: ROCm0,ROCM1,ROCm2
+      spec-draft-n-max: 4
+      spec-type: draft-mtp
+      spec-draft-p-min: 0.02
+  planning:
+    path: /llm/models/Qwen3.6/27B/Q8_K_XL/Qwen3.6-27B-Q8_K_XL.gguf
+    executable: rocm
+    alias: Qwen3.6-27B-Q8_K_XL
+    params:
+      fit: off
+      top-k: 20
+      temperature: 0.6
+      cache-type-k: bf16
+      cache-type-v: bf16
+      split-mode: tensor
+      device: ROCm0,ROCM1,ROCm2
+      spec-draft-n-max: 4
+      spec-type: draft-mtp
+      spec-draft-p-min: 0.02
+  running:
+    path: /home/llm/models/Qwen3.5/9B/Q8_0/Qwen3.5-9B-Q8_0.gguf
+    alias: "Qwen3.5-9B-A8_0"
+    params:
+      fit: off
+      top-k: 20
+      port: 8035
+      temperature: 0.0
+      device: Vulkan1
+      spec-draft-n-max: 4
+      spec-type: draft-mtp
+      spec-draft-p-min: 0.02
+  lfm2:
+    path: /llm/models/LiquidAI/LFM2/24B-A2B/Q8_0/LiquidAI_LFM2-24B-A2B-Q8_0.gguf
+    alias: "LFM2-24B-A2B-Q8_0"
+    params:
+      device: Vulkan1
+      ctx-size: 131072
+      port: 8034
+      device: Vulkan2
+  gemma4-qat:
+    path: /llm/models/Gemma4/31B-QAT/Q4_K_XL/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf
+    alias: Gemma4-31B-QAT
+    params:
+      fit: off
+      top-k: 64
+      temperature: 0.6
+      cache-type-k: q8_0
+      cache-type-v: q8_0
+      split-mode: layer
+      device: Vulkan0
+      spec-draft-n-max: 2
+      spec-type: draft-mtp
+      spec-draft-model: /llm/models/Gemma4/31B/gemma-4-31B-it-MTP-Q8_0.gguf
+      spec-draft-p-min: 0.02
+  gemma4-31b:
+    path: /llm/models/Gemma4/31B/gemma-4-31B-it-Q6_K.gguf 
+    alias: Gemma4-31B-Q6_K
+    params:
+      fit: off
+      top-k: 64
+      temperature: 0.6
+      cache-type-k: q8_0
+      cache-type-v: q8_0
+      split-mode: layer
+      device: Vulkan0
+      spec-draft-n-max: 2
+      spec-type: draft-mtp
+      spec-draft-model: /llm/models/Gemma4/31B/gemma-4-31B-it-MTP-Q8_0.gguf
+      spec-draft-p-min: 0.02

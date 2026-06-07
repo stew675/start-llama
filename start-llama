@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""start_llama — configurable launcher for llama-server."""
+
+import argparse
+import os
+import sys
+import traceback
+from pathlib import Path
+
+import yaml
+
+
+# Known toggle flags from llama-server --help that use --flag / --no-flag style.
+# If config sets these to true/false, we emit the bare or negated form.
+KNOWN_TOGGLES = {
+    "kv-offload", "repack", "op-offload", "context-shift", "cont-batching",
+    "warmup", "ui", "webui", "embeddings", "rerank", "cache-prompt", "jinja",
+    "mlock", "mmap", "direct-io", "mmproj-auto", "mmproj-offload",
+    "kv-unified", "cache-idle-slots", "models-autoload", "skip-chat-parsing",
+    "prefill-assistant", "perf", "escape", "webui-mcp-proxy", "ui-mcp-proxy",
+    "spec-draft-backend-sampling", "cpu-moe", "backend-sampling", "log-prefix",
+    "log-timestamps", "slots", "metrics", "props", "reuse-port",
+}
+
+# Flags that take no value (bare boolean flags, not toggles).
+# Setting these to true emits the bare flag; false is simply omitted.
+BARE_FLAGS = {
+    "mlock", "offline", "check-tensors", "log-disable", "special",
+    "ignore-eos",
+}
+
+# The long-form canonical name for each known toggle (used for --no- form).
+# Maps short aliases → long name so we can emit the correct flag.
+TOGGLE_LONG_NAMES = {
+    "kv-offload": "kv-offload",
+    "repack": "repack",
+    "op-offload": "op-offload",
+    "context-shift": "context-shift",
+    "cont-batching": "cont-batching",
+    "warmup": "warmup",
+    "ui": "ui",
+    "webui": "webui",
+    "embeddings": "embeddings",
+    "rerank": "rerank",
+    "cache-prompt": "cache-prompt",
+    "jinja": "jinja",
+    "mlock": "mlock",
+    "mmap": "mmap",
+    "direct-io": "direct-io",
+    "mmproj-auto": "mmproj-auto",
+    "mmproj-offload": "mmproj-offload",
+    "kv-unified": "kv-unified",
+    "cache-idle-slots": "cache-idle-slots",
+    "models-autoload": "models-autoload",
+    "skip-chat-parsing": "skip-chat-parsing",
+    "prefill-assistant": "prefill-assistant",
+    "perf": "perf",
+    "escape": "escape",
+    "webui-mcp-proxy": "webui-mcp-proxy",
+    "ui-mcp-proxy": "ui-mcp-proxy",
+    "spec-draft-backend-sampling": "spec-draft-backend-sampling",
+    "cpu-moe": "cpu-moe",
+    "backend-sampling": "backend-sampling",
+    "log-prefix": "log-prefix",
+    "log-timestamps": "log-timestamps",
+    "slots": "slots",
+    "metrics": "metrics",
+    "props": "props",
+    "reuse-port": "reuse-port",
+}
+
+
+def default_config_path():
+    return Path.home() / ".llama-server-config.yaml"
+
+
+def load_config(path):
+    p = Path(path)
+    if not p.exists():
+        print(f"Error: config file not found: {p}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(p) as f:
+            return yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        print(f"Error: failed to parse config {p}: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"Error: cannot read config {p}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def list_models(config):
+    models = config.get("models", {})
+    executables = config.get("executables", {})
+    default_exec = config.get("defaults", {}).get("executable", "?")
+    if not models:
+        print("No models configured.")
+        return
+    if executables:
+        entries = []
+        for k, v in executables.items():
+            entry_path = v.get("path", v) if isinstance(v, dict) else v
+            env_raw = v.get("env", {}) if isinstance(v, dict) else {}
+            if isinstance(env_raw, str):
+                env_vars = parse_env_string(env_raw)
+            else:
+                env_vars = env_raw
+            env_str = f"  [env: {' '.join(f'{ek}={ev}' for ek, ev in env_vars.items())}]" if env_vars else ""
+            entries.append(f"{k}={entry_path}{env_str}")
+        print(f"Executables: {' | '.join(entries)}")
+        print()
+    for i, name in enumerate(models, 1):
+        m = models[name]
+        alias = m.get("alias", "")
+        path_s = m.get("path", "?")
+        exec_tag = m.get("executable", default_exec)
+        label = f"{name}"
+        if alias:
+            label += f" ({alias})"
+        print(f"  {i}: {label}  [{path_s}]  executable: {exec_tag}")
+
+
+def interactive_select(config):
+    models = config.get("models", {})
+    if not models:
+        print("No models configured in config file.", file=sys.stderr)
+        sys.exit(1)
+    list_models(config)
+    names = list(models.keys())
+    while True:
+        try:
+            choice = input("\nSelect model [1-{}]: ".format(len(names))).strip()
+            if not choice:
+                continue
+            idx = int(choice) - 1
+            if 0 <= idx < len(names):
+                return names[idx]
+            print(f"Invalid selection. Enter a number between 1 and {len(names)}.")
+        except ValueError:
+            print("Please enter a number.")
+        except (KeyboardInterrupt, EOFError):
+            print("\nInterrupted.", file=sys.stderr)
+            sys.exit(130)
+
+
+def parse_cli_overrides(unknown_args):
+    """Parse unknown argparse args into an ordered list of (key, value_or_None).
+
+    Handles --flag value, --flag=value, and bare --flag (no value).
+    """
+    overrides = []
+    i = 0
+    while i < len(unknown_args):
+        arg = unknown_args[i]
+        if arg.startswith("--"):
+            name = arg[2:]
+            if "=" in name:
+                key, val = name.split("=", 1)
+                overrides.append((key, val))
+            else:
+                next_arg = unknown_args[i + 1] if i + 1 < len(unknown_args) else None
+                if next_arg and not next_arg.startswith("-"):
+                    overrides.append((name, next_arg))
+                    i += 1
+                else:
+                    overrides.append((name, None))
+        elif arg.startswith("-") and len(arg) == 2:
+            short = arg[1]
+            next_arg = unknown_args[i + 1] if i + 1 < len(unknown_args) else None
+            if next_arg and not next_arg.startswith("-"):
+                overrides.append((short, next_arg))
+                i += 1
+            else:
+                overrides.append((short, None))
+        i += 1
+    return overrides
+
+
+def build_param_args(params_dict):
+    """Convert a dict of params to a list of command-line arguments."""
+    args = []
+    for key, val in params_dict.items():
+        if isinstance(val, bool):
+            long_key = TOGGLE_LONG_NAMES.get(key, key)
+            if val:
+                if long_key in BARE_FLAGS:
+                    args.append(f"--{long_key}")
+                else:
+                    args.append(f"--{long_key}")
+            else:
+                if long_key in KNOWN_TOGGLES:
+                    args.append(f"--no-{long_key}")
+                else:
+                    args.append(f"--{key} false")
+        elif val is None:
+            args.append(f"--{key}")
+        else:
+            val_str = str(val)
+            if " " in val_str:
+                args.append(f'--{key}')
+                args.append(val_str)
+            else:
+                args.append(f"--{key} {val_str}")
+    return args
+
+
+def merge_params(defaults, model_params, cli_overrides):
+    """Merge params: defaults → model_params → cli_overrides (later wins)."""
+    merged = {}
+
+    if defaults:
+        for k, v in defaults.items():
+            merged[k] = v
+
+    if model_params:
+        for k, v in model_params.items():
+            merged[k] = v
+
+    for k, v in cli_overrides:
+        if v is None:
+            long_k = TOGGLE_LONG_NAMES.get(k, k)
+            if long_k in KNOWN_TOGGLES:
+                merged[k] = True
+            else:
+                merged[k] = None
+        else:
+            merged[k] = v
+
+    return merged
+
+
+def parse_env_string(env_str):
+    """Parse 'KEY=VALUE KEY2=VALUE2' or multiline env string into a dict."""
+    env = {}
+    for token in env_str.split():
+        if "=" in token:
+            k, v = token.split("=", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def resolve_executable(config, model_executable=None):
+    """Resolve the llama-server executable path and env vars.
+
+    Returns (path, env_dict).
+    Priority: model_executable override → defaults.executable → legacy llama_server key → "llama-server".
+    Looks up names against the executables map if provided.
+    """
+    executables = config.get("executables", {})
+
+    # If we got an explicit tag (from model override or defaults), resolve it
+    tag = model_executable or config.get("defaults", {}).get("executable")
+
+    if tag:
+        if executables:
+            if tag in executables:
+                entry = executables[tag]
+                if isinstance(entry, dict):
+                    path = entry.get("path", entry.get("command", tag))
+                    env_raw = entry.get("env", {})
+                    if isinstance(env_raw, str):
+                        return path, parse_env_string(env_raw)
+                    return path, env_raw
+                return entry, {}
+            print(f"Error: executable '{tag}' not found in config. Available: {', '.join(executables.keys())}", file=sys.stderr)
+            sys.exit(1)
+        # No executables map — treat tag as a literal path
+        return tag, {}
+
+    # Fall back to legacy single key
+    if config.get("llama_server"):
+        return config["llama_server"], {}
+
+    return "llama-server", {}
+
+
+def resolve_model_name(name, config):
+    """Resolve model name to (path, alias, model_params, executable_tag) or exit."""
+    models = config.get("models", {})
+
+    if name in models:
+        m = models[name]
+        path = m.get("path")
+        if not path:
+            print(f"Error: model '{name}' has no 'path' defined.", file=sys.stderr)
+            sys.exit(1)
+        params = {k: v for k, v in m.get("params", {}).items() if k != "executable"}
+        return path, m.get("alias"), params, m.get("executable")
+
+    p = Path(name)
+    if p.exists():
+        return str(p.resolve()), None, {}, None
+
+    print(f"Error: unknown model '{name}'.", file=sys.stderr)
+    print(f"It is not in the config and '{name}' is not an existing file.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def build_command(server_bin, model_path, alias, params):
+    """Build the full command list to invoke llama-server."""
+    cmd = [server_bin]
+
+    cmd.append("--model")
+    cmd.append(model_path)
+
+    if alias:
+        cmd.append("--alias")
+        cmd.append(alias)
+
+    for key, val in params.items():
+        if isinstance(val, bool):
+            long_key = TOGGLE_LONG_NAMES.get(key, key)
+            if val:
+                cmd.append(f"--{long_key}")
+            else:
+                if long_key in KNOWN_TOGGLES:
+                    cmd.append(f"--no-{long_key}")
+                else:
+                    cmd.append(f"--{key}")
+                    cmd.append("false")
+        elif val is None:
+            cmd.append(f"--{key}")
+        else:
+            cmd.append(f"--{key}")
+            cmd.append(str(val))
+
+    return cmd
+
+
+def create_default_config_if_missing(path):
+    """Create a starter config file if it doesn't exist."""
+    p = Path(path)
+    if p.exists():
+        return
+
+    starter = {
+        "executables": {
+            "vulkan": {
+                "path": "/llm/runtimes/native/llama-server",
+                "env": "GGML_VK_VISIBLE_DEVICES=1,2,3",
+            },
+            "rocm": {
+                "path": "/llm/runtimes/rocm/llama-server",
+                "env": "HIP_VISIBLE_DEVICES=0,1,2",
+            },
+        },
+        "defaults": {
+            "executable": "vulkan",
+            "n-gpu-layers": "auto",
+            "ctx-size": 4096,
+            "threads": 8,
+            "port": 8080,
+            "temperature": 0.8,
+            "top-k": 40,
+        },
+        "models": {
+            "example_model": {
+                "path": "/path/to/your/model.gguf",
+                "alias": "Example Model",
+                "params": {
+                    "ctx-size": 8192,
+                    "temperature": 0.7,
+                },
+            },
+        },
+    }
+
+    header = (
+        "# llama-server launcher config\n"
+        "# Lines below are examples — edit to match your setup.\n"
+        "#\n"
+        "# Parameter merge order: defaults → models.<name>.params → CLI args\n"
+        "#\n"
+        "# Boolean params: set to true/false for toggle flags (e.g., mlock: true → --mlock)\n"
+        "#\n"
+        "# Executable resolution: model.executable → defaults.executable → legacy llama_server key\n"
+    )
+
+    with open(p, "w") as f:
+        f.write(header)
+        yaml.dump(starter, f, default_flow_style=False, sort_keys=False)
+
+    print(f"Created starter config at {p}")
+    print("Edit it to add your models and defaults, then re-run.")
+    sys.exit(0)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Configurable launcher for llama-server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  ./start_llama                          interactive model selection\n"
+            "  ./start_llama mymodel                  start model 'mymodel' from config\n"
+            "  ./start_llama mymodel --port 9090      override port for a model\n"
+            "  ./start_llama /path/to/model.gguf      start arbitrary model file\n"
+            "  ./start_llama --list                   list configured models\n"
+            "  ./start_llama mymodel --dry-run        show command without running\n"
+            "  ./start_llama --config alt.yaml mymod  use alternate config file\n"
+        ),
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to config YAML (default: ~/.llama-server-config.yaml)",
+    )
+    parser.add_argument(
+        "--list", action="store_true", dest="list_models_flag",
+        help="List configured models and exit",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the command that would be run, but don't execute it",
+    )
+    args, unknown = parser.parse_known_args()
+
+    try:
+        _run_main(args, unknown)
+    except (KeyboardInterrupt, EOFError):
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
+
+
+def _run_main(args, unknown):
+    """Core logic of main(), separated for exception handling."""
+    config_path = Path(args.config) if args.config else default_config_path()
+
+    if not config_path.exists():
+        create_default_config_if_missing(config_path)
+
+    config = load_config(config_path)
+
+    if args.list_models_flag:
+        list_models(config)
+        return
+
+    defaults = {k: v for k, v in config.get("defaults", {}).items() if k != "executable"}
+
+    model_name = None
+    if unknown and not unknown[0].startswith("-"):
+        model_name = unknown[0]
+        cli_overrides = parse_cli_overrides(unknown[1:])
+    else:
+        cli_overrides = parse_cli_overrides(unknown)
+
+    if not model_name:
+        model_name = interactive_select(config)
+
+    model_path, alias, model_params, model_executable = resolve_model_name(model_name, config)
+    server_bin, exec_env = resolve_executable(config, model_executable)
+    merged = merge_params(defaults, model_params, cli_overrides)
+    cmd = build_command(server_bin, model_path, alias, merged)
+
+    if args.dry_run:
+        if exec_env:
+            env_str = " ".join(f"{k}={v}" for k, v in exec_env.items())
+            print(f"\nEnvironment: {env_str}")
+        print("\n" " ".join(cmd))
+        return
+
+    if exec_env:
+        env_str = " ".join(f"{k}={v}" for k, v in exec_env.items())
+        print(f"\nEnvironment: {env_str}", file=sys.stderr)
+        os.environ.update(exec_env)
+
+    print(f"\nStarting: {' '.join(cmd)}\n", file=sys.stderr)
+    os.execvp(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    main()

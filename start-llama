@@ -113,7 +113,11 @@ def list_models(config):
     for i, name in enumerate(models, 1):
         m = models[name]
         alias = m.get("alias", "")
-        path_s = m.get("path", "?")
+        path_s = m.get("path")
+        if not path_s:
+            model_dir = m.get("dir", "")
+            model_file = m.get("file", "")
+            path_s = str(Path(model_dir) / model_file) if model_dir and model_file else "?"
         exec_tag = m.get("executable", default_exec)
         label = f"{name}"
         if alias:
@@ -240,6 +244,19 @@ def parse_env_string(env_str):
     return env
 
 
+def substitute_vars(params, model_dir):
+    """Replace ${dir} placeholders in param string values with model_dir."""
+    if not params or not model_dir:
+        return params
+    result = {}
+    for k, v in params.items():
+        if isinstance(v, str) and "${dir}" in v:
+            result[k] = v.replace("${dir}", model_dir)
+        else:
+            result[k] = v
+    return result
+
+
 def resolve_executable(config, model_executable=None):
     """Resolve the llama-server executable path and env vars.
 
@@ -282,10 +299,18 @@ def resolve_model_name(name, config):
     if name in models:
         m = models[name]
         path = m.get("path")
+        model_dir = None
+
         if not path:
-            print(f"Error: model '{name}' has no 'path' defined.", file=sys.stderr)
-            sys.exit(1)
-        params = {k: v for k, v in m.get("params", {}).items() if k != "executable"}
+            model_dir = m.get("dir")
+            model_file = m.get("file")
+            if not model_dir or not model_file:
+                print(f"Error: model '{name}' has no 'path', 'dir', or 'file' defined.", file=sys.stderr)
+                sys.exit(1)
+            path = str(Path(model_dir) / model_file)
+
+        raw_params = {k: v for k, v in m.get("params", {}).items() if k != "executable"}
+        params = substitute_vars(raw_params, model_dir)
         return path, m.get("alias"), params, m.get("executable")
 
     p = Path(name)
@@ -296,6 +321,32 @@ def resolve_model_name(name, config):
     print(f"It is not in the config and '{name}' is not an existing file.",
           file=sys.stderr)
     sys.exit(1)
+
+
+def _emit_param(cmd, key, val):
+    """Append command-line arguments for a single param to the cmd list."""
+    if isinstance(val, bool):
+        long_key = TOGGLE_LONG_NAMES.get(key, key)
+        if val:
+            if long_key in BARE_FLAGS:
+                cmd.append(f"--{long_key}")
+            else:
+                cmd.append(f"--{long_key}")
+        else:
+            if long_key in KNOWN_TOGGLES:
+                cmd.append(f"--no-{long_key}")
+            else:
+                cmd.append(f"--{key}")
+                cmd.append("false")
+    elif val is None:
+        cmd.append(f"--{key}")
+    else:
+        val_str = str(val)
+        if " " in val_str:
+            cmd.append(f'--{key}')
+            cmd.append(val_str)
+        else:
+            cmd.append(f"--{key} {val_str}")
 
 
 def build_command(server_bin, model_path, alias, params):
@@ -309,22 +360,16 @@ def build_command(server_bin, model_path, alias, params):
         cmd.append("--alias")
         cmd.append(alias)
 
-    for key, val in params.items():
-        if isinstance(val, bool):
-            long_key = TOGGLE_LONG_NAMES.get(key, key)
-            if val:
-                cmd.append(f"--{long_key}")
-            else:
-                if long_key in KNOWN_TOGGLES:
-                    cmd.append(f"--no-{long_key}")
-                else:
-                    cmd.append(f"--{key}")
-                    cmd.append("false")
-        elif val is None:
-            cmd.append(f"--{key}")
-        else:
-            cmd.append(f"--{key}")
-            cmd.append(str(val))
+    # --rpc must appear before --device so that device references can resolve RPC endpoints.
+    remaining = {}
+    if "rpc" in params:
+        _emit_param(cmd, "rpc", params["rpc"])
+        remaining = {k: v for k, v in params.items() if k != "rpc"}
+    else:
+        remaining = params
+
+    for key, val in remaining.items():
+        _emit_param(cmd, key, val)
 
     return cmd
 
@@ -364,6 +409,16 @@ def create_default_config_if_missing(path):
                     "temperature": 0.7,
                 },
             },
+            "example_with_dir_file": {
+                "dir": "/path/to/model/dir",
+                "file": "model.gguf",
+                "alias": "Example Dir/File",
+                "params": {
+                    "ctx-size": 8192,
+                    "temperature": 0.7,
+                    "spec-draft-model": "${dir}/draft-model.gguf",
+                },
+            },
         },
     }
 
@@ -376,6 +431,9 @@ def create_default_config_if_missing(path):
         "# Boolean params: set to true/false for toggle flags (e.g., mlock: true → --mlock)\n"
         "#\n"
         "# Executable resolution: model.executable → defaults.executable → legacy llama_server key\n"
+        "#\n"
+        "# Model paths: use 'path' for a full path, or 'dir' + 'file' as alternatives.\n"
+        "#   When using 'dir', params can reference ${dir} for path substitution.\n"
     )
 
     with open(p, "w") as f:

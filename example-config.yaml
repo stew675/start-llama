@@ -4,6 +4,9 @@
 # Parameter merge order: defaults → models.<name>.params → CLI args
 #
 # Boolean params: set to true/false for toggle flags (e.g., mlock: true → --mlock)
+#
+# Model paths: use 'path' for a full path, or 'dir' + 'file' as alternatives.
+#   When using 'dir', params can reference ${dir} for path substitution.
 
 # Environment variables are set up so the iGPU is bypassed
 executables:
@@ -39,7 +42,8 @@ defaults:
 
 models:
   Qwen122B:
-    path: /llm/models/Qwen3.5/122B-A10B/Q5_K_S/Qwen3.5-122B-A10B-UD-Q5_K_S-00001-of-00003.gguf
+    dir: /llm/models/Qwen3.5/122B-A10B/Q5_K_S
+    file: Qwen3.5-122B-A10B-UD-Q5_K_S-00001-of-00003.gguf
     executable: rocm
     alias: Qwen3.5-122B-Q5
     params:
@@ -104,7 +108,8 @@ models:
       port: 8034
       device: Vulkan2
   gemma4-qat:
-    path: /llm/models/Gemma4/31B-QAT/Q4_K_XL/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf
+    dir: /llm/models/Gemma4/31B-QAT/Q4_K_XL
+    file: gemma-4-31B-it-qat-UD-Q4_K_XL.gguf
     alias: Gemma4-31B-QAT
     params:
       fit: off
@@ -116,10 +121,11 @@ models:
       device: Vulkan0
       spec-draft-n-max: 2
       spec-type: draft-mtp
-      spec-draft-model: /llm/models/Gemma4/31B/gemma-4-31B-it-MTP-Q8_0.gguf
+      spec-draft-model: ${dir}/../../31B/gemma-4-31B-it-MTP-Q8_0.gguf
       spec-draft-p-min: 0.02
   gemma4-31b:
-    path: /llm/models/Gemma4/31B/gemma-4-31B-it-Q6_K.gguf 
+    dir: /llm/models/Gemma4/31B
+    file: gemma-4-31B-it-Q6_K.gguf
     alias: Gemma4-31B-Q6_K
     params:
       fit: off
@@ -131,5 +137,5 @@ models:
       device: Vulkan0
       spec-draft-n-max: 2
       spec-type: draft-mtp
-      spec-draft-model: /llm/models/Gemma4/31B/gemma-4-31B-it-MTP-Q8_0.gguf
+      spec-draft-model: ${dir}/gemma-4-31B-it-MTP-Q8_0.gguf
       spec-draft-p-min: 0.02

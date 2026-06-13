@@ -205,7 +205,8 @@ def build_param_args(params_dict):
                 args.append(f'--{key}')
                 args.append(val_str)
             else:
-                args.append(f"--{key} {val_str}")
+                args.append(f"--{key}")
+                args.append(val_str)
     return args
 
 
@@ -346,7 +347,8 @@ def _emit_param(cmd, key, val):
             cmd.append(f'--{key}')
             cmd.append(val_str)
         else:
-            cmd.append(f"--{key} {val_str}")
+            cmd.append(f"--{key}")
+            cmd.append(val_str)
 
 
 def build_command(server_bin, model_path, alias, params):
